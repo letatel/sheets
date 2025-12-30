@@ -17,6 +17,7 @@ function SpreadsheetEditor({ spreadsheet, onUpdate, onShareClick }) {
   const [history, setHistory] = useState([]);
   const [historyIndex, setHistoryIndex] = useState(-1);
   const historyRef = useRef({ history: [], index: -1 });
+  const currentSheetIdRef = useRef(null);
   
   // Активные пользователи
   const [activeUsers, setActiveUsers] = useState([]);
@@ -114,11 +115,13 @@ function SpreadsheetEditor({ spreadsheet, onUpdate, onShareClick }) {
     }
   }, [currentSheet]);
 
-  const loadCells = useCallback(async () => {
-    if (!currentSheet) return;
+  const loadCells = useCallback(async (sheetId = null) => {
+    // Используем переданный sheetId или текущий currentSheet
+    const targetSheetId = sheetId || currentSheet?.id;
+    if (!targetSheetId) return;
     
     try {
-      const data = await api.getCells(currentSheet.id);
+      const data = await api.getCells(targetSheetId);
       // Обрабатываем случай, если API возвращает объект с пагинацией
       const cellsList = Array.isArray(data) ? data : (data.results || []);
       const cellsMap = {};
@@ -128,7 +131,8 @@ function SpreadsheetEditor({ spreadsheet, onUpdate, onShareClick }) {
       });
       setCells(cellsMap);
       
-      // Сохраняем начальное состояние в историю
+      // Сохраняем начальное состояние в историю (только если не редактируем)
+      // Во время редактирования не сохраняем в историю, чтобы не потерять состояние редактирования
       saveToHistory(cellsMap);
     } catch (error) {
       console.error('Ошибка загрузки ячеек:', error);
@@ -145,13 +149,50 @@ function SpreadsheetEditor({ spreadsheet, onUpdate, onShareClick }) {
 
   useEffect(() => {
     if (currentSheet) {
-      // Сбрасываем историю при смене листа
-      historyRef.current = { history: [], index: -1 };
-      setHistory([]);
-      setHistoryIndex(-1);
-      loadCells();
+      // Сохраняем текущий sheetId в ref для проверки в асинхронном коде
+      currentSheetIdRef.current = currentSheet.id;
+      
+      // ВСЕГДА загружаем ячейки нового листа при переключении, даже во время редактирования
+      // Используем явный sheetId, чтобы гарантировать загрузку правильного листа
+      // Сначала очищаем старые ячейки, чтобы не показывать данные предыдущего листа
+      setCells({});
+      
+      // Загружаем ячейки нового листа напрямую, без использования loadCells callback
+      // Это гарантирует, что мы всегда используем актуальный currentSheet.id
+      const sheetId = currentSheet.id;
+      api.getCells(sheetId)
+        .then(data => {
+          const cellsList = Array.isArray(data) ? data : (data.results || []);
+          const cellsMap = {};
+          cellsList.forEach(cell => {
+            const key = `${cell.row}_${cell.column}`;
+            cellsMap[key] = cell;
+          });
+          // Проверяем, что лист не изменился во время загрузки
+          setCells(prevCells => {
+            // Если currentSheet изменился, не обновляем ячейки
+            if (currentSheetIdRef.current !== sheetId) {
+              return prevCells;
+            }
+            return cellsMap;
+          });
+        })
+        .catch(error => {
+          console.error('Ошибка загрузки ячеек:', error);
+          // Проверяем, что лист не изменился перед очисткой
+          if (currentSheetIdRef.current === sheetId) {
+            setCells({});
+          }
+        });
+      
+      // Сбрасываем историю при смене листа (только если не редактируем)
+      // Во время редактирования не сбрасываем историю, чтобы не потерять состояние редактирования
+      // TODO: можно добавить проверку через ref из Grid, но пока просто не сбрасываем
+      // historyRef.current = { history: [], index: -1 };
+      // setHistory([]);
+      // setHistoryIndex(-1);
     }
-  }, [currentSheet, loadCells]);
+  }, [currentSheet?.id]);
 
   // WebSocket подключение
   useEffect(() => {
@@ -287,9 +328,9 @@ function SpreadsheetEditor({ spreadsheet, onUpdate, onShareClick }) {
         return newCells;
       });
       
-      // Если изменилось значение (не формула), перезагружаем все ячейки,
-      // чтобы обновить зависимые формулы
-      if (!formula && style === null) {
+      // Если изменилось значение или формула, перезагружаем все ячейки,
+      // чтобы обновить зависимые формулы и показать результат вычисления
+      if (style === null) {
         // Небольшая задержка, чтобы дать серверу время пересчитать зависимости
         setTimeout(() => {
           loadCells();

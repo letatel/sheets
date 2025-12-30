@@ -368,6 +368,16 @@
   box-shadow: 0 0 0 2px rgba(33, 150, 243, 0.1);
 }
 
+.formula-bar.editing-mode {
+  background-color: #f0f7ff;
+  border-bottom: 2px solid #2196F3;
+}
+
+.formula-bar.editing-mode .formula-bar-label {
+  background-color: #2196F3;
+  color: white;
+}
+
 .formula-bar-input::placeholder {
   color: #999;
 }

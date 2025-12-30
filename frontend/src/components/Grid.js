@@ -39,10 +39,12 @@ function Grid({
   const gridRef = useRef(null);
   const inputRef = useRef(null);
   const formulaBarRef = useRef(null);
-  const editingSheetRef = useRef(null);
-  const formulaMenuRef = useRef(null);
-  const colorPickerRef = useRef(null);
-
+  const isClickingCell = useRef(false);
+  const editingSheetRef = useRef(null); // Сохраняем лист, на котором началось редактирование
+  const editingFromFormulaBarRef = useRef(false);
+  const isClickingFormulaBarRef = useRef(false);
+  const blurTimeoutRef = useRef(null);
+  
   const colors = [
     '#FFFFFF', '#FFEBEE', '#FCE4EC', '#F3E5F5', '#E8EAF6',
     '#E3F2FD', '#E0F2F1', '#E8F5E9', '#FFF9C4', '#FFF3E0',
@@ -66,51 +68,56 @@ function Grid({
 
   // Синхронизация строки формул
   useEffect(() => {
-    if (!editingCell && selectedCell) {
-      const key = getCellKey(selectedCell.row, selectedCell.column);
-      const cell = cells[key];
-      const value = cell?.formula || cell?.value || '';
-      setFormulaBarValue(value);
-      setEditValue(value);
+    if (!editingCell) {
+      // Синхронизируем строку формул при изменении выбранной ячейки (только если не редактируем)
+      if (selectedCell && !editingFromFormulaBarRef.current) {
+        const key = getCellKey(selectedCell.row, selectedCell.column);
+        const cell = cells[key];
+        const value = cell?.formula || cell?.value || '';
+        setFormulaBarValue(value);
+        setEditValue(value);
+        setIsEditingFromFormulaBar(false);
+      }
+      return;
     }
-  }, [selectedCell, editingCell, cells]);
+    
+    // Устанавливаем фокус с небольшой задержкой, чтобы избежать конфликтов
+    // Но только если фокус действительно потерян
+    const timeoutId = setTimeout(() => {
+      if (editingFromFormulaBarRef.current) {
+        if (formulaBarRef.current) {
+          // Проверяем, что фокус действительно не на строке формул
+          const activeElement = document.activeElement;
+          if (activeElement !== formulaBarRef.current && 
+              !(activeElement?.closest && activeElement.closest('.formula-bar'))) {
+            formulaBarRef.current.focus();
+            const length = formulaBarRef.current.value.length;
+            formulaBarRef.current.setSelectionRange(length, length);
+          }
+        }
+      } else if (inputRef.current && document.activeElement !== inputRef.current) {
+        inputRef.current.focus();
+      }
+    }, 10);
+    
+    return () => clearTimeout(timeoutId);
+  }, [editingCell, selectedCell]);
 
   // Восстановление фокуса при смене листа
   useEffect(() => {
     if (editingCell && currentSheet && !editingSheetRef.current) {
       editingSheetRef.current = currentSheet;
     }
-    if (editingCell && inputRef.current && !isEditingFromFormulaBar) {
-      setTimeout(() => inputRef.current?.focus(), 50);
+    // Восстанавливаем фокус на поле ввода при смене листа, если редактирование активно
+    if (editingCell && inputRef.current) {
+      setTimeout(() => {
+        if (inputRef.current) {
+          inputRef.current.focus();
+        }
+      }, 50);
     }
-  }, [editingCell, currentSheet, isEditingFromFormulaBar]);
+  }, [editingCell, currentSheet]);
 
-  // Обработка клика вне строки формул / меню
-  useEffect(() => {
-    const handleClickOutside = (e) => {
-      if (
-        editingCell &&
-        isEditingFromFormulaBar &&
-        formulaBarRef.current &&
-        !formulaBarRef.current.contains(e.target)
-      ) {
-        commitEditFromFormulaBar();
-      }
-
-      if (showFormulaMenu && formulaMenuRef.current && !formulaMenuRef.current.contains(e.target)) {
-        setShowFormulaMenu(false);
-      }
-
-      if (showColorPicker && colorPickerRef.current && !colorPickerRef.current.contains(e.target)) {
-        setShowColorPicker(false);
-      }
-    };
-
-    document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, [editingCell, isEditingFromFormulaBar, showFormulaMenu, showColorPicker]);
-
-  // Drag selection
   useEffect(() => {
     const handleMouseUp = () => {
       setIsSelecting(false);
@@ -301,31 +308,107 @@ function Grid({
   };
 
   const handleCellClick = (row, column, e) => {
-    if (editingCell) {
+    // Устанавливаем фокус на контейнер для обработки клавиатуры
+    if (gridRef.current && !editingCell) {
+      gridRef.current.focus();
+    }
+    
+    // Если мы в режиме редактирования И редактируем не через строку формул, добавляем ссылку на ячейку в формулу
+    if (editingCell && !editingFromFormulaBarRef.current) {
       e.preventDefault();
       e.stopPropagation();
-
-      if (!editingSheetRef.current) editingSheetRef.current = currentSheet;
-
-      let ref = getCellReference(row, column);
-      if (editingSheetRef.current.id !== currentSheet.id) {
-        ref = `${currentSheet.name}!${ref}`;
+      
+      // Убеждаемся, что editingSheetRef установлен
+      if (!editingSheetRef.current && currentSheet) {
+        editingSheetRef.current = currentSheet;
       }
-
-      const current = isEditingFromFormulaBar ? formulaBarValue : editValue;
-      const newValue = current.startsWith('=') ? current + ref : '=' + ref;
-
-      if (isEditingFromFormulaBar) {
-        setFormulaBarValue(newValue);
-        setEditValue(newValue);
-        setTimeout(() => formulaBarRef.current?.focus(), 0);
+      
+      let cellRef = getCellReference(row, column);
+      
+      // Проверяем, находится ли кликнутая ячейка на другом листе
+      // Если редактирование началось на другом листе, добавляем имя текущего листа
+      if (editingSheetRef.current && currentSheet) {
+        // Если редактирование началось на другом листе, добавляем имя текущего листа
+        if (editingSheetRef.current.id !== currentSheet.id) {
+          // Ячейка на другом листе - добавляем имя листа
+          cellRef = `${currentSheet.name}!${cellRef}`;
+        }
+        // Если редактирование и клик на одном листе, просто добавляем ссылку без имени листа
+      }
+      
+      // Добавляем ссылку на ячейку в текущее значение формулы
+      const currentValue = editValue || '';
+      let newValue;
+      // Если формула уже начинается с =, просто добавляем ссылку
+      if (currentValue.startsWith('=')) {
+        newValue = currentValue + cellRef;
       } else {
-        setEditValue(newValue);
-        setFormulaBarValue(newValue);
-        setTimeout(() => inputRef.current?.focus(), 0);
+        // Если нет =, добавляем = и ссылку
+        newValue = '=' + cellRef;
       }
+      
+      setEditValue(newValue);
+      setFormulaBarValue(newValue);
+      // Обновляем выделение, но остаемся в режиме редактирования
       setSelectedCell({ row, column });
       setSelectionRange(null);
+      // Фокусируемся обратно на поле ввода
+      setTimeout(() => {
+        if (inputRef.current) {
+          inputRef.current.focus();
+          // Перемещаем курсор в конец
+          const length = inputRef.current.value.length;
+          inputRef.current.setSelectionRange(length, length);
+        }
+      }, 10);
+      return;
+    }
+    
+    // Если редактируем через строку формул и кликаем на ячейку, добавляем ссылку на ячейку в формулу
+    if (editingCell && editingFromFormulaBarRef.current) {
+      e.preventDefault();
+      e.stopPropagation();
+      
+      // Убеждаемся, что editingSheetRef установлен
+      if (!editingSheetRef.current && currentSheet) {
+        editingSheetRef.current = currentSheet;
+      }
+      
+      let cellRef = getCellReference(row, column);
+      
+      // Проверяем, находится ли кликнутая ячейка на другом листе
+      if (editingSheetRef.current && currentSheet) {
+        if (editingSheetRef.current.id !== currentSheet.id) {
+          // Ячейка на другом листе - добавляем имя листа
+          cellRef = `${currentSheet.name}!${cellRef}`;
+        }
+      }
+      
+      // Получаем текущее значение из строки формул
+      const currentValue = formulaBarValue || editValue || '';
+      let newValue;
+      // Если формула уже начинается с =, просто добавляем ссылку
+      if (currentValue.startsWith('=')) {
+        newValue = currentValue + cellRef;
+      } else {
+        // Если нет =, добавляем = и ссылку
+        newValue = '=' + cellRef;
+      }
+      
+      setEditValue(newValue);
+      setFormulaBarValue(newValue);
+      // Обновляем выделение, но остаемся в режиме редактирования
+      setSelectedCell({ row, column });
+      setSelectionRange(null);
+      // Фокусируемся обратно на строку формул
+      setTimeout(() => {
+        if (formulaBarRef.current) {
+          formulaBarRef.current.focus();
+          // Перемещаем курсор в конец
+          const length = formulaBarRef.current.value.length;
+          formulaBarRef.current.setSelectionRange(length, length);
+        }
+      }, 10);
       return;
     }
 
@@ -349,17 +432,30 @@ function Grid({
 
   const handleFormulaBarChange = (e) => {
     const value = e.target.value;
-    setEditValue(value);
-    setFormulaBarValue(value);
+    // При изменении строки формул всегда обновляем editValue
+    // и переводим ячейку в режим редактирования, если еще не в нем
+    editingFromFormulaBarRef.current = true;
+    setIsEditingFromFormulaBar(true);
     setIsEditingFromFormulaBar(true);
     if (!editingCell && selectedCell) {
       setEditingCell({ row: selectedCell.row, column: selectedCell.column });
       editingSheetRef.current = currentSheet;
     }
+    setEditValue(value);
+    setFormulaBarValue(value);
+    // Синхронизируем с input в ячейке
+    if (inputRef.current && editingCell) {
+      inputRef.current.value = value;
+    }
   };
 
-  const handleFormulaBarFocus = () => {
-    setIsEditingFromFormulaBar(true);
+  const handleFormulaBarFocus = (e) => {
+    // Предотвращаем всплытие события
+    e.stopPropagation();
+    
+    // При фокусе на строке формул переходим в режим редактирования выбранной ячейки
+    editingFromFormulaBarRef.current = true;
+    
     if (!editingCell && selectedCell) {
       const key = getCellKey(selectedCell.row, selectedCell.column);
       const cell = cells[key];
@@ -368,7 +464,91 @@ function Grid({
       editingSheetRef.current = currentSheet;
       setEditValue(value);
       setFormulaBarValue(value);
+      
+      // Устанавливаем фокус после обновления состояния
+      setTimeout(() => {
+        if (formulaBarRef.current) {
+          formulaBarRef.current.focus();
+          const length = formulaBarRef.current.value.length;
+          formulaBarRef.current.setSelectionRange(length, length);
+        }
+      }, 0);
+    } else if (editingCell) {
+      // Если уже редактируем, синхронизируем значение
+      setFormulaBarValue(editValue);
+      // Убеждаемся, что фокус остается на строке формул
+      setTimeout(() => {
+        if (formulaBarRef.current && document.activeElement !== formulaBarRef.current) {
+          formulaBarRef.current.focus();
+        }
+      }, 0);
     }
+  };
+
+  const handleFormulaBarBlur = (event) => {
+    const e = event || {};
+    // Очищаем предыдущий timeout, если он есть
+    if (blurTimeoutRef.current) {
+      clearTimeout(blurTimeoutRef.current);
+      blurTimeoutRef.current = null;
+    }
+    
+    // Если кликнули на ячейку, не выходим из режима редактирования
+    if (isClickingCell.current) {
+      return;
+    }
+    
+    // Если кликнули на строку формул, полностью игнорируем blur
+    if (isClickingFormulaBarRef.current) {
+      // Восстанавливаем фокус немедленно
+      setTimeout(() => {
+        if (formulaBarRef.current && document.activeElement !== formulaBarRef.current) {
+          formulaBarRef.current.focus();
+        }
+      }, 0);
+      return;
+    }
+    
+    // Если фокус перешел на другой элемент внутри строки формул, не выходим из режима редактирования
+    const relatedTarget = e.relatedTarget;
+    if (relatedTarget?.closest?.('.formula-bar')) {
+      return;
+    }
+    
+    // Если фокус потерян из-за клика на саму строку формул, не выходим
+    const target = e.target || formulaBarRef.current;
+    if (relatedTarget === formulaBarRef.current || 
+        (relatedTarget && relatedTarget === target)) {
+      return;
+    }
+    
+    // Откладываем blur, чтобы дать время для обработки кликов
+    blurTimeoutRef.current = setTimeout(() => {
+      // Проверяем, что фокус действительно потерян и не был восстановлен
+      if (document.activeElement !== formulaBarRef.current && !isClickingFormulaBarRef.current) {
+        editingFromFormulaBarRef.current = false;
+        setIsEditingFromFormulaBar(false);
+        
+        // Сохраняем значение из строки формул
+        if (editingCell) {
+          const { row, column } = editingCell;
+          const value = (formulaBarRef.current?.value || '').trim();
+          
+          // Не сохраняем пустую или неполную формулу
+          if (value && value !== '=') {
+            if (value.startsWith('=')) {
+              onCellChange(row, column, '', value);
+            } else {
+              onCellChange(row, column, value, '');
+            }
+          }
+          
+          setEditingCell(null);
+          setEditValue('');
+          editingSheetRef.current = null;
+        }
+      }
+    }, 200);
   };
 
   const handleFormulaBarKeyDown = (e) => {
@@ -542,11 +722,13 @@ function Grid({
           )}
         </div>
       </div>
-
-      {/* Formula Bar */}
+      
+      {/* Строка формул */}
       <div className="formula-bar">
         <div className="formula-bar-label">
-          {selectedCell ? getCellReference(selectedCell.row, selectedCell.column) : ''}
+          {editingCell && editingSheetRef.current && editingSheetRef.current.id !== currentSheet?.id 
+            ? `${editingSheetRef.current.name}!${selectedCell ? getCellReference(selectedCell.row, selectedCell.column) : ''}`
+            : (selectedCell ? getCellReference(selectedCell.row, selectedCell.column) : '')}
         </div>
         <div className="formula-bar-separator" />
         <input
@@ -554,7 +736,12 @@ function Grid({
           type="text"
           className="formula-bar-input"
           placeholder="Введите формулу или значение"
-          value={editingCell ? (isEditingFromFormulaBar ? formulaBarValue : editValue) : formulaBarValue}
+          value={editingCell ? (isEditingFromFormulaBar ? formulaBarValue : editValue) : (() => {
+            if (!selectedCell) return '';
+            const key = getCellKey(selectedCell.row, selectedCell.column);
+            const cell = cells[key];
+            return cell?.formula || cell?.value || '';
+          })()}
           onChange={handleFormulaBarChange}
           onFocus={handleFormulaBarFocus}
           onKeyDown={handleFormulaBarKeyDown}
